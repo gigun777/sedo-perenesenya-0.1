@@ -8,9 +8,33 @@ function hasField(schema, fieldId) {
   return Boolean(schema?.fields?.some((field) => field.id === fieldId));
 }
 
+function applyPolicyGuards(errors, plan) {
+  const policies = plan.context?.policies ?? {};
+
+  if (Array.isArray(policies.allowedSpaceIds) && policies.allowedSpaceIds.length) {
+    if (!policies.allowedSpaceIds.includes(plan.context?.spaceId)) {
+      errors.push({ code: "policy_space_denied", spaceId: plan.context?.spaceId ?? null });
+    }
+  }
+
+  if (Array.isArray(policies.allowedRoles) && policies.allowedRoles.length) {
+    if (!policies.allowedRoles.includes(plan.context?.role)) {
+      errors.push({ code: "policy_role_denied", role: plan.context?.role ?? null });
+    }
+  }
+
+  if (Array.isArray(policies.allowedStatuses) && policies.allowedStatuses.length) {
+    if (!policies.allowedStatuses.includes(plan.context?.status)) {
+      errors.push({ code: "policy_status_denied", status: plan.context?.status ?? null });
+    }
+  }
+}
+
 export function validate(execution, plan) {
   const errors = [];
   const warnings = [];
+
+  applyPolicyGuards(errors, plan);
 
   for (const step of execution.steps) {
     if (step.rule.op === "math") {

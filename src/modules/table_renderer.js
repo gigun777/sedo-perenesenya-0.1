@@ -1,6 +1,7 @@
 import { createTableEngine } from './table_engine.js';
 import { formatCell as defaultFormatCell, parseInput as defaultParseInput } from './table_formatter.js';
 import { buildTransferPlan, applyTransferPlan } from '../../packages/transfer-core/src/index.js';
+import { createTransferUI } from '../../packages/transfer-ui/src/index.js';
 
 function cellKey(rowId, colKey) {
   return `${rowId}:${colKey}`;
@@ -170,6 +171,32 @@ export function createTableRendererModule(opts = {}) {
     await saveDataset(runtime, storage, targetJournalId, result.targetNextDataset);
     return { sourceJournalId, targetJournalId, report: result.report };
   }
+
+  function createTransferUiBridge(runtime, storage) {
+    const stateGetter = () => runtime?.api?.getState ? runtime.api.getState() : (runtime?.sdo?.api?.getState ? runtime.sdo.api.getState() : { journals: [] });
+
+    const storageAdapter = {
+      get: async (key) => {
+        const value = await storage.get(key);
+        return value ?? null;
+      },
+      set: async (key, value) => {
+        await storage.set(key, value);
+      }
+    };
+
+    return createTransferUI({
+      storageAdapter,
+      loadDataset: async (journalId) => loadDataset(runtime, storage, journalId),
+      saveDataset: async (journalId, dataset) => saveDataset(runtime, storage, journalId, dataset),
+      getSchema: async (journalId) => (await resolveSchemaByJournalId(runtime, journalId)).schema,
+      listJournals: async () => {
+        const state = stateGetter();
+        return (state?.journals ?? []).map((journal) => ({ id: journal.id, title: journal.title }));
+      }
+    });
+  }
+
 
   async function resolveSchema(runtime) {
     const state = runtime?.api?.getState ? runtime.api.getState() : (runtime?.sdo?.api?.getState ? runtime.sdo.api.getState() : null);
@@ -518,6 +545,9 @@ export function createTableRendererModule(opts = {}) {
         const selectBtn = document.createElement('button');
         selectBtn.textContent = selectionMode ? 'Вибір: ON' : 'Вибір';
 
+        const transferSelectedBtn = document.createElement('button');
+        transferSelectedBtn.textContent = 'Перенести обрані';
+
         const search = document.createElement('input');
         search.placeholder = 'Пошук';
 
@@ -548,7 +578,7 @@ export function createTableRendererModule(opts = {}) {
           controls.classList.add('sdo-table-controls-inline');
           headerHost.append(controls);
         }
-        controls.append(addBtn, selectBtn, search);
+        controls.append(addBtn, selectBtn, transferSelectedBtn, search);
         mount.append(container);
 
         const listeners = [];
@@ -739,7 +769,7 @@ if (isFirstCol) {
               transferBtn.title = 'Перенести рядок';
               transferBtn.addEventListener('click', (ev) => {
                 ev.stopPropagation();
-                runtime.sdo.commands.run('table.transferRow', { rowId: row.rowId });
+                runtime.sdo.commands.run('table.transferRow', { rowId: row.rowId, sourceJournalId: currentJournalId });
               });
               tdTransfer.append(transferBtn);
               tr.append(tdTransfer);
@@ -841,6 +871,15 @@ if (isFirstCol) {
           await refreshTable();
         });
 
+        transferSelectedBtn.addEventListener('click', async () => {
+          const selectedIds = [...(engine?.compute()?.selection ?? [])];
+          if (!selectedIds.length) {
+            window.UI?.toast?.show?.('Оберіть рядки для перенесення');
+            return;
+          }
+          await runtime.sdo.commands.run('table.transferSelected', { sourceJournalId: currentJournalId, rowIds: selectedIds });
+        });
+
         search.addEventListener('change', async () => {
           const settings = await loadSettings(runtime.storage);
           const next = { ...settings, filter: { ...(settings.filter ?? {}), global: search.value ?? '' } };
@@ -884,6 +923,29 @@ if (isFirstCol) {
         {
           id: 'table.transferRow',
           title: 'Transfer row',
+          run: async (runtime, args = {}) => {
+            const sourceJournalId = args.sourceJournalId ?? runtime?.api?.getState?.()?.activeJournalId;
+            if (!sourceJournalId || !args.rowId) return false;
+            const transferUI = createTransferUiBridge(runtime, runtime.storage ?? ctx.storage);
+            await transferUI.openRunTransferModal({ sourceJournalId, recordIds: [args.rowId] });
+            return true;
+          }
+        },
+        {
+          id: 'table.transferSelected',
+          title: 'Transfer selected rows',
+          run: async (runtime, args = {}) => {
+            const sourceJournalId = args.sourceJournalId ?? runtime?.api?.getState?.()?.activeJournalId;
+            let rowIds = Array.isArray(args.rowIds) ? args.rowIds : [];
+            if (!rowIds.length) {
+              const settings = await loadSettings(runtime.storage ?? ctx.storage);
+              rowIds = Array.isArray(settings?.selectedRowIds) ? settings.selectedRowIds : [];
+            }
+            if (!sourceJournalId || !rowIds.length) return false;
+            const transferUI = createTransferUiBridge(runtime, runtime.storage ?? ctx.storage);
+            await transferUI.openRunTransferModal({ sourceJournalId, recordIds: rowIds });
+            return true;
+          }
           run: async () => true
         },
         {
@@ -917,6 +979,18 @@ if (isFirstCol) {
       });
 
       ctx.ui.registerButton({
+        id: '@sdo/module-table-renderer:transfer-selected',
+        label: 'Перенести обрані',
+        location: 'toolbar',
+        order: 32,
+        onClick: () => ctx.commands.run('table.transferSelected')
+      });
+
+      ctx.ui.registerButton({
+        id: '@sdo/module-table-renderer:test-transfer',
+        label: 'Test transfer',
+        location: 'toolbar',
+        order: 33,
         id: '@sdo/module-table-renderer:test-transfer',
         label: 'Test transfer',
         location: 'toolbar',

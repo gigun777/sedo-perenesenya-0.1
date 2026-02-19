@@ -34,6 +34,18 @@ function resolveTarget(target, input) {
 }
 
 function createExecution(plan) {
+  const ruleResults = new Map();
+  const ctxBase = {
+    sourceDataset: plan.source.dataset,
+    targetDataset: plan.target.dataset,
+    selection: plan.selection,
+    context: plan.context,
+    ruleResults
+  };
+
+  const steps = [];
+  for (const rule of plan.template.rules ?? []) {
+    const resolvedSources = resolveSources(rule.sources, ctxBase);
   const ctx = {
     sourceDataset: plan.source.dataset,
     targetDataset: plan.target.dataset
@@ -46,6 +58,9 @@ function createExecution(plan) {
       .map((target) => resolveTargetSpec(target, plan))
       .filter(Boolean);
 
+    ruleResults.set(rule.id, result.value);
+    steps.push({ rule, resolvedSources, resolvedTargets, result });
+  }
     return { rule, resolvedSources, resolvedTargets, result };
   });
 

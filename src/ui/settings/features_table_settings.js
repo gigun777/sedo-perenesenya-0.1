@@ -17,6 +17,54 @@
     };
   }
 
+  function transferSectionContent() {
+    return function render(container) {
+      container.innerHTML = '';
+      const status = document.createElement('p');
+      status.textContent = 'Завантаження конструктора перенесень...';
+      container.append(status);
+
+      const run = async () => {
+        try {
+          const mod = await import('../../../../packages/transfer-ui/src/index.js');
+          const state = UI.sdo?.getState?.() || { journals: [] };
+          const tableStore = UI.sdo?.api?.tableStore;
+          const journalTemplates = UI.sdo?.journalTemplates || UI.sdo?.api?.journalTemplates;
+
+          const transferUI = mod.createTransferUI({
+            storageAdapter: {
+              get: async (key) => {
+                const raw = UI.storage?.getItem?.(key);
+                try { return JSON.parse(raw); } catch { return raw; }
+              },
+              set: async (key, value) => {
+                UI.storage?.setItem?.(key, JSON.stringify(value));
+              }
+            },
+            loadDataset: async (journalId) => tableStore?.getDataset?.(journalId) ?? { journalId, records: [] },
+            saveDataset: async (journalId, dataset) => tableStore?.upsertRecords?.(journalId, dataset.records ?? [], 'replace'),
+            getSchema: async (journalId) => {
+              const journal = (UI.sdo?.getState?.().journals ?? []).find((item) => item.id === journalId);
+              const template = journal?.templateId ? await journalTemplates?.getTemplate?.(journal.templateId) : null;
+              return {
+                journalId,
+                fields: (template?.columns ?? []).map((column) => ({ id: column.key, title: column.label, type: 'text' }))
+              };
+            },
+            listJournals: async () => (UI.sdo?.getState?.().journals ?? []).map((journal) => ({ id: journal.id, title: journal.title }))
+          });
+
+          status.remove();
+          await transferUI.renderTransferSettingsSection(container);
+        } catch (error) {
+          status.textContent = `Помилка завантаження перенесень: ${error.message}`;
+        }
+      };
+
+      run();
+    };
+  }
+
   function createTableSettingsFeature() {
     return {
       id: 'table',
@@ -46,9 +94,9 @@
         },
         {
           id: 'transfer',
-          title: 'Перенесення',
+          title: 'Перенесення → Шаблони',
           order: 40,
-          renderContent: sectionContent('Перенесення', 'Параметри перенесення даних між таблицями.'),
+          renderContent: transferSectionContent(),
           onConfirm: ({ draft }) => draft
         }
       ]

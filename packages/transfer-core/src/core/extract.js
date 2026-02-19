@@ -23,6 +23,53 @@ function resolveCellSource(cellRef, ctx) {
       value: undefined,
       meta: { kind: "cell", cell: cellRef, error: "record_not_found" }
     };
+  }
+
+  return {
+    value: record.cells?.[cellRef.fieldId],
+    meta: { kind: "cell", cell: cellRef }
+  };
+}
+
+function resolveCurrentRowSource(fieldId, ctx) {
+  const recordId = ctx.context?.currentRecordId;
+  const record = getRecordById(ctx.sourceDataset, recordId);
+  return {
+    value: record?.cells?.[fieldId],
+    meta: { kind: "current_row", recordId, fieldId }
+  };
+}
+
+function resolveSelectedRowsSource(fieldId, ctx) {
+  const recordIds = ctx.selection?.recordIds ?? [];
+  return recordIds.map((recordId) => {
+    const record = getRecordById(ctx.sourceDataset, recordId);
+    return {
+      value: record?.cells?.[fieldId],
+      meta: { kind: "selected_row", recordId, fieldId }
+    };
+  });
+}
+
+function resolveRuleResultSource(source, ctx) {
+  const ruleId = source.ruleResultId ?? source.ruleResult?.ruleId;
+  if (!ruleId) {
+    return {
+      value: undefined,
+      meta: { kind: "rule_result", error: "rule_result_id_missing" }
+    };
+  }
+
+  if (!ctx.ruleResults?.has(ruleId)) {
+    return {
+      value: undefined,
+      meta: { kind: "rule_result", ruleId, error: "rule_result_not_found" }
+    };
+  }
+
+  return {
+    value: ctx.ruleResults.get(ruleId),
+    meta: { kind: "rule_result", ruleId }
 function getRecord(dataset, recordId) {
   return dataset?.records?.find((record) => record.id === recordId) ?? null;
 }
@@ -65,6 +112,22 @@ export function resolveSources(sources, ctx) {
       continue;
     }
 
+    if (source?.currentRowFieldId) {
+      resolved.push(resolveCurrentRowSource(source.currentRowFieldId, ctx));
+      continue;
+    }
+
+    if (source?.selectedRowsFieldId) {
+      resolved.push(...resolveSelectedRowsSource(source.selectedRowsFieldId, ctx));
+      continue;
+    }
+
+    if (source?.ruleResultId || source?.ruleResult) {
+      resolved.push(resolveRuleResultSource(source, ctx));
+      continue;
+    }
+
+    resolved.push({ value: undefined, meta: { kind: "unknown_source", source, error: "unsupported_source" } });
     resolved.push({ value: undefined, meta: { kind: "unknown_source", source, error: "unsupported_source" } });
     if (Object.hasOwn(source, "value")) {
       resolved.push({ value: source.value, meta: { kind: "value" } });
