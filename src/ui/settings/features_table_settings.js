@@ -26,11 +26,14 @@
 
       const run = async () => {
         try {
+          const mod = await import('../../../../packages/transfer/src/index.js');
           const mod = await import('../../../../packages/transfer-ui/src/index.js');
           const state = UI.sdo?.getState?.() || { journals: [] };
           const tableStore = UI.sdo?.api?.tableStore;
           const journalTemplates = UI.sdo?.journalTemplates || UI.sdo?.api?.journalTemplates;
 
+          const transferStorage = mod.createTransferStorage({
+            storage: {
           const transferUI = mod.createTransferUI({
             storageAdapter: {
               get: async (key) => {
@@ -40,6 +43,10 @@
               set: async (key, value) => {
                 UI.storage?.setItem?.(key, JSON.stringify(value));
               }
+            }
+          });
+
+          const journals = mod.createJournalsAdapter({
             },
             loadDataset: async (journalId) => tableStore?.getDataset?.(journalId) ?? { journalId, records: [] },
             saveDataset: async (journalId, dataset) => tableStore?.upsertRecords?.(journalId, dataset.records ?? [], 'replace'),
@@ -54,6 +61,18 @@
             listJournals: async () => (UI.sdo?.getState?.().journals ?? []).map((journal) => ({ id: journal.id, title: journal.title }))
           });
 
+          const core = mod.createTransferCore({ storage: transferStorage, journals, logger: console });
+          const transferUI = mod.createTransferUI({
+            core,
+            journals,
+            ui: {
+              openModal: ({ title, contentNode }) => UI.modal.open({ title, contentNode, closeOnOverlay: true }),
+              closeModal: (id) => UI.modal.close(id)
+            }
+          });
+
+          status.remove();
+          await transferUI.openSettings(container);
           status.remove();
           await transferUI.renderTransferSettingsSection(container);
         } catch (error) {

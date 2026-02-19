@@ -1,6 +1,7 @@
 import { createTableEngine } from './table_engine.js';
 import { formatCell as defaultFormatCell, parseInput as defaultParseInput } from './table_formatter.js';
 import { buildTransferPlan, applyTransferPlan } from '../../packages/transfer-core/src/index.js';
+import { createTransferCore, createTransferStorage, createJournalsAdapter, createTransferUI } from '../../packages/transfer/src/index.js';
 import { createTransferUI } from '../../packages/transfer-ui/src/index.js';
 
 function cellKey(rowId, colKey) {
@@ -173,6 +174,14 @@ export function createTableRendererModule(opts = {}) {
   }
 
   function createTransferUiBridge(runtime, storage) {
+    const storageApi = createTransferStorage({
+      storage: {
+        get: (key) => storage.get(key),
+        set: (key, value) => storage.set(key, value)
+      }
+    });
+
+    const journalsApi = createJournalsAdapter({
     const stateGetter = () => runtime?.api?.getState ? runtime.api.getState() : (runtime?.sdo?.api?.getState ? runtime.sdo.api.getState() : { journals: [] });
 
     const storageAdapter = {
@@ -191,6 +200,21 @@ export function createTableRendererModule(opts = {}) {
       saveDataset: async (journalId, dataset) => saveDataset(runtime, storage, journalId, dataset),
       getSchema: async (journalId) => (await resolveSchemaByJournalId(runtime, journalId)).schema,
       listJournals: async () => {
+        const state = runtime?.api?.getState ? runtime.api.getState() : (runtime?.sdo?.api?.getState ? runtime.sdo.api.getState() : { journals: [] });
+        return (state?.journals ?? []).map((journal) => ({ id: journal.id, title: journal.title }));
+      }
+    });
+
+    const core = createTransferCore({ storage: storageApi, journals: journalsApi, logger: console });
+
+    return createTransferUI({
+      core,
+      journals: journalsApi,
+      ui: {
+        openModal: ({ title, contentNode }) => window.UI.modal.open({ title, contentNode, closeOnOverlay: true }),
+        closeModal: (id) => window.UI.modal.close(id)
+      }
+    });
         const state = stateGetter();
         return (state?.journals ?? []).map((journal) => ({ id: journal.id, title: journal.title }));
       }
