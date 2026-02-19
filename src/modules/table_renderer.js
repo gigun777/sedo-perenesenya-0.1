@@ -1,6 +1,9 @@
 import { createTableEngine } from './table_engine.js';
 import { formatCell as defaultFormatCell, parseInput as defaultParseInput } from './table_formatter.js';
 import { createTransferCore, createTransferStorage, createJournalsAdapter, createTransferUI } from '../../packages/transfer/src/index.js';
+import { buildTransferPlan, applyTransferPlan } from '../../packages/transfer-core/src/index.js';
+import { createTransferCore, createTransferStorage, createJournalsAdapter, createTransferUI } from '../../packages/transfer/src/index.js';
+import { createTransferUI } from '../../packages/transfer-ui/src/index.js';
 
 function cellKey(rowId, colKey) {
   return `${rowId}:${colKey}`;
@@ -113,6 +116,18 @@ export function createTableRendererModule(opts = {}) {
 
     const sourceDataset = await loadDataset(runtime, storage, sourceJournalId);
     const targetDataset = await loadDataset(runtime, storage, targetJournalId);
+    const sourceResolved = await resolveSchemaByJournalId(runtime, sourceJournalId);
+    const targetResolved = await resolveSchemaByJournalId(runtime, targetJournalId);
+
+    const sourceDataset = await loadDataset(runtime, storage, sourceJournalId);
+    const targetDataset = await loadDataset(runtime, storage, targetJournalId);
+
+    const sourceFields = sourceResolved.schema.fields;
+    const targetFields = targetResolved.schema.fields;
+    if (sourceFields.length < 1 || targetFields.length < 1) {
+      throw new Error('Недостатньо полів у source/target схемах для test transfer');
+    }
+
     const sourceRecord = sourceDataset.records?.[0] ?? null;
     const targetRecord = targetDataset.records?.[0] ?? null;
     if (!sourceRecord || !targetRecord) {
@@ -120,6 +135,10 @@ export function createTableRendererModule(opts = {}) {
     }
 
     const transferUI = createTransferUiBridge(runtime, storage);
+    const leftField = sourceFields[0].id;
+    const rightField = sourceFields[1]?.id ?? sourceFields[0].id;
+    const targetField = targetFields[0].id;
+
     const template = {
       id: 'temp-test-transfer',
       title: 'Test transfer template',
@@ -130,11 +149,14 @@ export function createTableRendererModule(opts = {}) {
           sources: [
             { cell: { journalId: sourceJournalId, recordId: sourceRecord.id, fieldId: Object.keys(sourceRecord.cells ?? {})[0] } },
             { value: 'test' }
+            { cell: { journalId: sourceJournalId, recordId: sourceRecord.id, fieldId: leftField } },
+            { cell: { journalId: sourceJournalId, recordId: sourceRecord.id, fieldId: rightField } }
           ],
           op: 'concat',
           params: { separator: ' / ', trim: true, skipEmpty: true },
           targets: [
             { cell: { journalId: targetJournalId, recordId: targetRecord.id, fieldId: Object.keys(targetRecord.cells ?? {})[0] } }
+            { cell: { journalId: targetJournalId, recordId: targetRecord.id, fieldId: targetField } }
           ],
           write: { mode: 'replace' }
         }
@@ -150,6 +172,15 @@ export function createTableRendererModule(opts = {}) {
     const previewCtx = await transferUI.core.preview(prepared, { targetRef: { journalId: targetJournalId } });
     const result = await transferUI.core.commit(previewCtx);
 
+    const plan = buildTransferPlan({
+      template,
+      source: { schema: sourceResolved.schema, dataset: sourceDataset },
+      target: { schema: targetResolved.schema, dataset: targetDataset },
+      selection: { recordIds: [sourceRecord.id] },
+      context: { currentRecordId: sourceRecord.id, targetRecordId: targetRecord.id }
+    });
+
+    const result = applyTransferPlan(plan);
     if (result.report.errors.length) {
       throw new Error(`Test transfer failed: ${result.report.errors.map((error) => error.code).join(', ')}`);
     }
@@ -157,6 +188,10 @@ export function createTableRendererModule(opts = {}) {
     return { sourceJournalId, targetJournalId, report: result.report };
   }
 
+
+    await saveDataset(runtime, storage, targetJournalId, result.targetNextDataset);
+    return { sourceJournalId, targetJournalId, report: result.report };
+  }
 
   function createTransferUiBridge(runtime, storage) {
     const storageApi = createTransferStorage({
@@ -167,6 +202,20 @@ export function createTableRendererModule(opts = {}) {
     });
 
     const journalsApi = createJournalsAdapter({
+    const stateGetter = () => runtime?.api?.getState ? runtime.api.getState() : (runtime?.sdo?.api?.getState ? runtime.sdo.api.getState() : { journals: [] });
+
+    const storageAdapter = {
+      get: async (key) => {
+        const value = await storage.get(key);
+        return value ?? null;
+      },
+      set: async (key, value) => {
+        await storage.set(key, value);
+      }
+    };
+
+    return createTransferUI({
+      storageAdapter,
       loadDataset: async (journalId) => loadDataset(runtime, storage, journalId),
       saveDataset: async (journalId, dataset) => saveDataset(runtime, storage, journalId, dataset),
       getSchema: async (journalId) => (await resolveSchemaByJournalId(runtime, journalId)).schema,
@@ -179,6 +228,7 @@ export function createTableRendererModule(opts = {}) {
     const core = createTransferCore({ storage: storageApi, journals: journalsApi, logger: console });
 
     const transferUI = createTransferUI({
+    return createTransferUI({
       core,
       journals: journalsApi,
       ui: {
@@ -188,6 +238,10 @@ export function createTableRendererModule(opts = {}) {
     });
 
     return transferUI;
+        const state = stateGetter();
+        return (state?.journals ?? []).map((journal) => ({ id: journal.id, title: journal.title }));
+      }
+    });
   }
 
 
@@ -939,6 +993,7 @@ if (isFirstCol) {
             await transferUI.openRunTransferModal({ sourceJournalId, recordIds: rowIds });
             return true;
           }
+          run: async () => true
         },
         {
           id: 'table.testTransfer',
@@ -983,6 +1038,10 @@ if (isFirstCol) {
         label: 'Test transfer',
         location: 'toolbar',
         order: 33,
+        id: '@sdo/module-table-renderer:test-transfer',
+        label: 'Test transfer',
+        location: 'toolbar',
+        order: 32,
         onClick: () => ctx.commands.run('table.testTransfer')
       });
 

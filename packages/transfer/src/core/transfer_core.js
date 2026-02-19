@@ -155,6 +155,9 @@ function executePlan(plan) {
   };
 }
 
+import { buildTransferPlan, previewTransferPlan, applyTransferPlan } from '../../../transfer-core/src/index.js';
+import { migrateTemplates, validateTemplate } from './model/template.schema.js';
+
 export function createTransferCore({ storage, journals, logger } = {}) {
   if (!storage) throw new Error('createTransferCore requires storage adapter');
   if (!journals) throw new Error('createTransferCore requires journals adapter');
@@ -210,6 +213,7 @@ export function createTransferCore({ storage, journals, logger } = {}) {
     const targetRecordId = targetDataset.records?.[0]?.id ?? null;
 
     const plan = {
+    const plan = buildTransferPlan({
       template: ctx.template,
       source: { schema: ctx.sourceSchema, dataset: ctx.sourceDataset },
       target: { schema: targetSchema, dataset: targetDataset },
@@ -235,6 +239,21 @@ export function createTransferCore({ storage, journals, logger } = {}) {
     const applied = applyWrites(previewCtx.plan.source.dataset, previewCtx.plan.target.dataset, executed.writes);
     await journals.saveDataset(previewCtx.plan.target.dataset.journalId, applied.targetNextDataset);
     return { ...applied, report: executed.report };
+    });
+
+    const report = previewTransferPlan(plan);
+    return { plan, report, targetDataset, targetSchema };
+  }
+
+  async function commit(previewCtx) {
+    const applied = applyTransferPlan(previewCtx.plan);
+    if (applied.report.errors.length) {
+      logger?.error?.('transfer commit blocked', applied.report.errors);
+      return applied;
+    }
+
+    await journals.saveDataset(previewCtx.plan.target.dataset.journalId, applied.targetNextDataset);
+    return applied;
   }
 
   return {
