@@ -11,6 +11,21 @@ function resolveTargetSpec(target, plan) {
     return {
       journalId: plan.target.dataset.journalId,
       recordId: plan.context?.targetRecordId ?? plan.context?.currentRecordId ?? plan.selection?.recordIds?.[0] ?? null,
+import { validate } from "./guards.js";
+import { buildReport } from "./result.js";
+import { applyWrites } from "./writer.js";
+
+function pickDefaultTargetRecordId(input) {
+  return input.context?.targetRecordId ?? input.context?.currentRecordId ?? input.selection?.recordIds?.[0] ?? null;
+}
+
+function resolveTarget(target, input) {
+  if (target.cell) return target.cell;
+
+  if (target.targetRowFieldId) {
+    return {
+      journalId: input.target.dataset.journalId,
+      recordId: pickDefaultTargetRecordId(input),
       fieldId: target.targetRowFieldId
     };
   }
@@ -31,6 +46,13 @@ function createExecution(plan) {
   const steps = [];
   for (const rule of plan.template.rules ?? []) {
     const resolvedSources = resolveSources(rule.sources, ctxBase);
+  const ctx = {
+    sourceDataset: plan.source.dataset,
+    targetDataset: plan.target.dataset
+  };
+
+  const steps = (plan.template.rules ?? []).map((rule) => {
+    const resolvedSources = resolveSources(rule.sources, ctx);
     const result = evaluateRule(rule, resolvedSources);
     const resolvedTargets = (rule.targets ?? [])
       .map((target) => resolveTargetSpec(target, plan))
@@ -39,6 +61,8 @@ function createExecution(plan) {
     ruleResults.set(rule.id, result.value);
     steps.push({ rule, resolvedSources, resolvedTargets, result });
   }
+    return { rule, resolvedSources, resolvedTargets, result };
+  });
 
   return { steps };
 }
@@ -50,6 +74,39 @@ export function buildTransferPlan(input) {
     target: input.target,
     selection: input.selection ?? { recordIds: [] },
     context: input.context ?? {}
+export function buildTransferPlan(input) {
+  const ctx = {
+    sourceDataset: input.source.dataset,
+    targetDataset: input.target.dataset,
+    selection: input.selection ?? { recordIds: [] },
+    context: input.context ?? {},
+    policies: input.context?.policies ?? {}
+  };
+
+  const steps = (input.template.rules ?? []).map((rule) => {
+    const resolvedSources = resolveSources(rule.sources, ctx);
+    const result = evaluateRule(rule, resolvedSources, ctx);
+    const writes = (rule.targets ?? [])
+      .map((target) => ({
+        target: resolveTarget(target, input),
+        value: result.value,
+        write: rule.write
+      }))
+      .filter((write) => Boolean(write.target?.recordId && write.target?.fieldId));
+
+    return { rule, resolvedSources, result, writes };
+  });
+
+  const validation = validate({ steps }, ctx);
+
+  return {
+    templateId: input.template.id,
+    source: input.source,
+    target: input.target,
+    steps,
+    validation,
+    context: input.context ?? {},
+    selection: input.selection ?? { recordIds: [] }
   };
 }
 
@@ -79,6 +136,20 @@ export function applyTransferPlan(plan) {
   }));
 
   const nextDatasets = applyWrites(
+  return buildReport(plan);
+}
+
+export function applyTransferPlan(plan) {
+  if (!plan.validation.allowed) {
+    return {
+      sourceNextDataset: plan.source.dataset,
+      targetNextDataset: plan.target.dataset,
+      report: buildReport(plan)
+    };
+  }
+
+  const writes = plan.steps.flatMap((step) => step.writes);
+  const next = applyWrites(
     {
       sourceDataset: plan.source.dataset,
       targetDataset: plan.target.dataset
@@ -89,5 +160,7 @@ export function applyTransferPlan(plan) {
   return {
     ...nextDatasets,
     report
+    ...next,
+    report: buildReport(plan)
   };
 }

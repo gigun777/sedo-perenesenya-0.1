@@ -946,6 +946,7 @@ if (isFirstCol) {
             await transferUI.openRunTransferModal({ sourceJournalId, recordIds: rowIds });
             return true;
           }
+          run: async () => true
         },
         {
           id: 'table.testTransfer',
@@ -990,6 +991,10 @@ if (isFirstCol) {
         label: 'Test transfer',
         location: 'toolbar',
         order: 33,
+        id: '@sdo/module-table-renderer:test-transfer',
+        label: 'Test transfer',
+        location: 'toolbar',
+        order: 32,
         onClick: () => ctx.commands.run('table.testTransfer')
       });
 
