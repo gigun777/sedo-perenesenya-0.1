@@ -2,6 +2,7 @@ import { createTableEngine } from './table_engine.js';
 import { formatCell as defaultFormatCell, parseInput as defaultParseInput } from './table_formatter.js';
 import { buildTransferPlan, applyTransferPlan } from '../../packages/transfer-core/src/index.js';
 import { createTransferCore, createTransferStorage, createJournalsAdapter, createTransferUI } from '../../packages/transfer/src/index.js';
+import { createTransferUI } from '../../packages/transfer-ui/src/index.js';
 
 function cellKey(rowId, colKey) {
   return `${rowId}:${colKey}`;
@@ -181,6 +182,20 @@ export function createTableRendererModule(opts = {}) {
     });
 
     const journalsApi = createJournalsAdapter({
+    const stateGetter = () => runtime?.api?.getState ? runtime.api.getState() : (runtime?.sdo?.api?.getState ? runtime.sdo.api.getState() : { journals: [] });
+
+    const storageAdapter = {
+      get: async (key) => {
+        const value = await storage.get(key);
+        return value ?? null;
+      },
+      set: async (key, value) => {
+        await storage.set(key, value);
+      }
+    };
+
+    return createTransferUI({
+      storageAdapter,
       loadDataset: async (journalId) => loadDataset(runtime, storage, journalId),
       saveDataset: async (journalId, dataset) => saveDataset(runtime, storage, journalId, dataset),
       getSchema: async (journalId) => (await resolveSchemaByJournalId(runtime, journalId)).schema,
@@ -198,6 +213,10 @@ export function createTableRendererModule(opts = {}) {
       ui: {
         openModal: ({ title, contentNode }) => window.UI.modal.open({ title, contentNode, closeOnOverlay: true }),
         closeModal: (id) => window.UI.modal.close(id)
+      }
+    });
+        const state = stateGetter();
+        return (state?.journals ?? []).map((journal) => ({ id: journal.id, title: journal.title }));
       }
     });
   }
@@ -951,6 +970,7 @@ if (isFirstCol) {
             await transferUI.openRunTransferModal({ sourceJournalId, recordIds: rowIds });
             return true;
           }
+          run: async () => true
         },
         {
           id: 'table.testTransfer',
@@ -995,6 +1015,10 @@ if (isFirstCol) {
         label: 'Test transfer',
         location: 'toolbar',
         order: 33,
+        id: '@sdo/module-table-renderer:test-transfer',
+        label: 'Test transfer',
+        location: 'toolbar',
+        order: 32,
         onClick: () => ctx.commands.run('table.testTransfer')
       });
 

@@ -10,6 +10,18 @@ function cloneDataset(dataset) {
 }
 
 function appendByMode(currentValue, nextValue, writeMode) {
+    meta: {
+      ...(dataset.meta ?? {}),
+      updatedAt: Date.now()
+    }
+  };
+}
+
+function getRecord(dataset, recordId) {
+  return dataset.records.find((record) => record.id === recordId);
+}
+
+function appendValue(currentValue, nextValue, write) {
   const current = currentValue ?? "";
   const incoming = nextValue ?? "";
 
@@ -38,6 +50,12 @@ export function applyWrite(dataset, targetCell, value, writeMode) {
   return true;
 }
 
+  if (write.appendMode === "space") return `${current} ${incoming}`;
+  if (write.appendMode === "newline") return `${current}\n${incoming}`;
+  if (write.appendMode === "separator") return `${current}${write.appendSeparator ?? ""}${incoming}`;
+  return `${current}${incoming}`;
+}
+
 export function applyWrites(datasets, writes) {
   const sourceNextDataset = cloneDataset(datasets.sourceDataset);
   const targetNextDataset = cloneDataset(datasets.targetDataset);
@@ -46,6 +64,18 @@ export function applyWrites(datasets, writes) {
     const dataset =
       write.target.journalId === sourceNextDataset.journalId ? sourceNextDataset : targetNextDataset;
     applyWrite(dataset, write.target, write.value, write.writeMode);
+  for (const write of writes) {
+    const isSource = write.target.journalId === sourceNextDataset.journalId;
+    const dataset = isSource ? sourceNextDataset : targetNextDataset;
+    const record = getRecord(dataset, write.target.recordId);
+    if (!record) continue;
+
+    const fieldId = write.target.fieldId;
+    if (write.write.mode === "append") {
+      record.cells[fieldId] = appendValue(record.cells[fieldId], write.value, write.write);
+    } else {
+      record.cells[fieldId] = write.value;
+    }
   }
 
   return { sourceNextDataset, targetNextDataset };

@@ -27,12 +27,15 @@
       const run = async () => {
         try {
           const mod = await import('../../../../packages/transfer/src/index.js');
+          const mod = await import('../../../../packages/transfer-ui/src/index.js');
           const state = UI.sdo?.getState?.() || { journals: [] };
           const tableStore = UI.sdo?.api?.tableStore;
           const journalTemplates = UI.sdo?.journalTemplates || UI.sdo?.api?.journalTemplates;
 
           const transferStorage = mod.createTransferStorage({
             storage: {
+          const transferUI = mod.createTransferUI({
+            storageAdapter: {
               get: async (key) => {
                 const raw = UI.storage?.getItem?.(key);
                 try { return JSON.parse(raw); } catch { return raw; }
@@ -44,6 +47,7 @@
           });
 
           const journals = mod.createJournalsAdapter({
+            },
             loadDataset: async (journalId) => tableStore?.getDataset?.(journalId) ?? { journalId, records: [] },
             saveDataset: async (journalId, dataset) => tableStore?.upsertRecords?.(journalId, dataset.records ?? [], 'replace'),
             getSchema: async (journalId) => {
@@ -69,6 +73,8 @@
 
           status.remove();
           await transferUI.openSettings(container);
+          status.remove();
+          await transferUI.renderTransferSettingsSection(container);
         } catch (error) {
           status.textContent = `Помилка завантаження перенесень: ${error.message}`;
         }

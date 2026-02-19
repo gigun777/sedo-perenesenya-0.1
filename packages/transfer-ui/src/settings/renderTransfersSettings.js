@@ -5,6 +5,7 @@ import {
   exportTemplatesBackup,
   importTemplatesBackup
 } from '../storage/templates_store.js';
+import { createTemplateDraft, loadTemplates, saveTemplates } from '../storage/templates_store.js';
 import { openTemplateEditorModal } from './templateEditorModal.js';
 
 export async function renderTransferSettingsSection(container, api) {
@@ -103,6 +104,20 @@ export async function renderTransferSettingsSection(container, api) {
     });
 
     container.append(actions, list);
+    const addBtn = document.createElement('button');
+    addBtn.textContent = 'Створити шаблон';
+    addBtn.onclick = () =>
+      openTemplateEditorModal({
+        template: createTemplateDraft(),
+        journals,
+        onSave: async (nextTemplate) => {
+          templates.push(nextTemplate);
+          await saveTemplates(storageAdapter, templates);
+          await render();
+        }
+      });
+
+    container.append(addBtn, list);
   };
 
   await render();
