@@ -1,5 +1,7 @@
 import { createTableEngine } from './table_engine.js';
 import { formatCell as defaultFormatCell, parseInput as defaultParseInput } from './table_formatter.js';
+import { buildTransferPlan, applyTransferPlan } from '../../packages/transfer-core/src/index.js';
+import { createTransferUI } from '../../packages/transfer-ui/src/index.js';
 
 function cellKey(rowId, colKey) {
   return `${rowId}:${colKey}`;
@@ -82,6 +84,120 @@ export function createTableRendererModule(opts = {}) {
     };
   }
 
+
+  async function resolveSchemaByJournalId(runtime, journalId) {
+    const state = runtime?.api?.getState ? runtime.api.getState() : (runtime?.sdo?.api?.getState ? runtime.sdo.api.getState() : null);
+    const journal = (state?.journals ?? []).find((j) => j.id === journalId) ?? null;
+    if (!journal?.templateId) return { schema: { journalId, fields: [] }, journal, state };
+
+    const jt = runtime?.api?.journalTemplates || runtime?.sdo?.api?.journalTemplates || runtime?.sdo?.journalTemplates;
+    if (!jt?.getTemplate) return { schema: { journalId, fields: [] }, journal, state };
+
+    const template = await jt.getTemplate(journal.templateId);
+    const fields = (template?.columns ?? []).map((column) => ({
+      id: column.key,
+      title: column.label,
+      type: 'text'
+    }));
+
+    return { schema: { journalId, fields }, journal, state };
+  }
+
+  async function runTestTransfer(runtime, storage) {
+    const state = runtime?.api?.getState ? runtime.api.getState() : (runtime?.sdo?.api?.getState ? runtime.sdo.api.getState() : null);
+    const sourceJournalId = state?.activeJournalId ?? null;
+    if (!sourceJournalId) throw new Error('Активний журнал не визначено');
+
+    const journals = state?.journals ?? [];
+    const targetJournalId = journals.find((journal) => journal.id !== sourceJournalId)?.id ?? null;
+    if (!targetJournalId) throw new Error('Не знайдено цільовий журнал для test transfer');
+
+    const sourceResolved = await resolveSchemaByJournalId(runtime, sourceJournalId);
+    const targetResolved = await resolveSchemaByJournalId(runtime, targetJournalId);
+
+    const sourceDataset = await loadDataset(runtime, storage, sourceJournalId);
+    const targetDataset = await loadDataset(runtime, storage, targetJournalId);
+
+    const sourceFields = sourceResolved.schema.fields;
+    const targetFields = targetResolved.schema.fields;
+    if (sourceFields.length < 1 || targetFields.length < 1) {
+      throw new Error('Недостатньо полів у source/target схемах для test transfer');
+    }
+
+    const sourceRecord = sourceDataset.records?.[0] ?? null;
+    const targetRecord = targetDataset.records?.[0] ?? null;
+    if (!sourceRecord || !targetRecord) {
+      throw new Error('Недостатньо рядків у source/target dataset для test transfer');
+    }
+
+    const leftField = sourceFields[0].id;
+    const rightField = sourceFields[1]?.id ?? sourceFields[0].id;
+    const targetField = targetFields[0].id;
+
+    const template = {
+      id: 'temp-test-transfer',
+      title: 'Test transfer template',
+      rules: [
+        {
+          id: 'rule-1',
+          name: 'concat sample',
+          sources: [
+            { cell: { journalId: sourceJournalId, recordId: sourceRecord.id, fieldId: leftField } },
+            { cell: { journalId: sourceJournalId, recordId: sourceRecord.id, fieldId: rightField } }
+          ],
+          op: 'concat',
+          params: { separator: ' / ', trim: true, skipEmpty: true },
+          targets: [
+            { cell: { journalId: targetJournalId, recordId: targetRecord.id, fieldId: targetField } }
+          ],
+          write: { mode: 'replace' }
+        }
+      ]
+    };
+
+    const plan = buildTransferPlan({
+      template,
+      source: { schema: sourceResolved.schema, dataset: sourceDataset },
+      target: { schema: targetResolved.schema, dataset: targetDataset },
+      selection: { recordIds: [sourceRecord.id] },
+      context: { currentRecordId: sourceRecord.id, targetRecordId: targetRecord.id }
+    });
+
+    const result = applyTransferPlan(plan);
+    if (result.report.errors.length) {
+      throw new Error(`Test transfer failed: ${result.report.errors.map((error) => error.code).join(', ')}`);
+    }
+
+    await saveDataset(runtime, storage, targetJournalId, result.targetNextDataset);
+    return { sourceJournalId, targetJournalId, report: result.report };
+  }
+
+  function createTransferUiBridge(runtime, storage) {
+    const stateGetter = () => runtime?.api?.getState ? runtime.api.getState() : (runtime?.sdo?.api?.getState ? runtime.sdo.api.getState() : { journals: [] });
+
+    const storageAdapter = {
+      get: async (key) => {
+        const value = await storage.get(key);
+        return value ?? null;
+      },
+      set: async (key, value) => {
+        await storage.set(key, value);
+      }
+    };
+
+    return createTransferUI({
+      storageAdapter,
+      loadDataset: async (journalId) => loadDataset(runtime, storage, journalId),
+      saveDataset: async (journalId, dataset) => saveDataset(runtime, storage, journalId, dataset),
+      getSchema: async (journalId) => (await resolveSchemaByJournalId(runtime, journalId)).schema,
+      listJournals: async () => {
+        const state = stateGetter();
+        return (state?.journals ?? []).map((journal) => ({ id: journal.id, title: journal.title }));
+      }
+    });
+  }
+
+
   async function resolveSchema(runtime) {
     const state = runtime?.api?.getState ? runtime.api.getState() : (runtime?.sdo?.api?.getState ? runtime.sdo.api.getState() : null);
     const journalId = state?.activeJournalId;
@@ -130,7 +246,6 @@ export function createTableRendererModule(opts = {}) {
       const defaultTplId = (list.find((t) => t.id === 'test')?.id) || (list[0]?.id) || null;
       if (defaultTplId) {
         templateId = defaultTplId;
-        // Persist into navigation state (best-effort)
         if (typeof runtime?.sdo?.commit === 'function') {
           await runtime.sdo.commit((next) => {
             next.journals = (next.journals ?? []).map((j) => (j.id === journal.id ? { ...j, templateId: defaultTplId } : j));
@@ -160,14 +275,12 @@ export function createTableRendererModule(opts = {}) {
       const ds = await store.getDataset(journalId);
       return normalizeDataset({ records: ds.records ?? [], merges: ds.merges ?? [] });
     }
-    // fallback single-dataset storage
     return normalizeDataset((await storage.get(datasetKey)) ?? { records: [], merges: [] });
   }
 
   async function saveDataset(runtime, storage, journalId, dataset) {
     const store = runtime?.api?.tableStore || runtime?.sdo?.api?.tableStore;
     if (store?.upsertRecords && journalId) {
-      // Replace records for now (renderer owns ordering)
       await store.upsertRecords(journalId, dataset.records ?? [], 'replace');
       return;
     }
@@ -182,23 +295,162 @@ export function createTableRendererModule(opts = {}) {
           cleanupTableToolbar();};
   }
 
-  function createModal() {
+  function openAddModal({ fields, onSubmit, onCancel }) {
+    // Overlay
     const overlay = document.createElement('div');
-    overlay.style.position = 'fixed';
-    overlay.style.inset = '0';
-    overlay.style.background = 'rgba(0,0,0,.35)';
-    overlay.style.display = 'flex';
-    overlay.style.alignItems = 'center';
-    overlay.style.justifyContent = 'center';
+    overlay.className = 'sdo-add-modal-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
 
-    const modal = document.createElement('div');
-    modal.style.background = '#fff';
-    modal.style.padding = '12px';
-    modal.style.borderRadius = '8px';
-    modal.style.minWidth = '360px';
+    // Window
+    const win = document.createElement('div');
+    win.className = 'sdo-add-modal-window';
 
-    overlay.append(modal);
-    return { overlay, modal };
+    // Body (scroll only inside)
+    const body = document.createElement('div');
+    body.className = 'sdo-add-modal-body';
+
+    const form = document.createElement('form');
+    form.className = 'sdo-add-modal-form';
+    form.addEventListener('submit', (ev) => ev.preventDefault());
+
+    const values = {};
+    const inputs = [];
+
+    const todayUA = (() => {
+      try {
+        const d = new Date();
+        const dd = String(d.getDate()).padStart(2, '0');
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const yyyy = String(d.getFullYear());
+        return `${dd}.${mm}.${yyyy}`;
+      } catch {
+        return '';
+      }
+    })();
+
+    for (const field of fields) {
+      const row = document.createElement('div');
+      row.className = 'sdo-add-modal-row';
+
+      const label = document.createElement('label');
+      label.className = 'sdo-add-modal-label';
+      label.textContent = `${field.label}${field.required ? ' (обов\'язково)' : ''}`;
+
+      const input = document.createElement('input');
+      input.className = 'sdo-add-modal-input';
+      input.type = 'text';
+
+      // Heuristics for placeholders (until template columns carry explicit types)
+      const lbl = String(field.label ?? '').toLowerCase();
+      const wantsDigits = /номер|кількість|к-сть|№/.test(lbl);
+      const wantsDate = /дата/.test(lbl);
+      if (wantsDigits) {
+        input.inputMode = 'numeric';
+        input.placeholder = 'Лише цифри';
+        input.addEventListener('input', () => {
+          const cleaned = input.value.replace(/\D+/g, '');
+          if (cleaned !== input.value) input.value = cleaned;
+          values[field.key] = input.value;
+        });
+      } else if (wantsDate) {
+        input.placeholder = 'ДД.ММ.РРРР';
+        // auto-fill today's date if empty
+        input.value = (field.default ?? '') || todayUA;
+        values[field.key] = input.value;
+        input.addEventListener('input', () => { values[field.key] = input.value; });
+      } else {
+        input.value = field.default ?? '';
+        values[field.key] = input.value;
+        input.addEventListener('input', () => { values[field.key] = input.value; });
+      }
+
+      label.append(input);
+      row.append(label);
+      form.append(row);
+      inputs.push(input);
+    }
+
+    const hint = document.createElement('div');
+    hint.className = 'sdo-add-modal-hint';
+    hint.textContent = 'Підтвердження: Enter = далі / Готово. На останньому полі Enter = Додати.';
+
+    form.append(hint);
+    body.append(form);
+
+    // Footer
+    const footer = document.createElement('div');
+    footer.className = 'sdo-add-modal-footer';
+
+    const btnCancel = document.createElement('button');
+    btnCancel.type = 'button';
+    btnCancel.className = 'sdo-btn sdo-btn-secondary';
+    btnCancel.textContent = 'Скасувати';
+
+    const btnOk = document.createElement('button');
+    btnOk.type = 'button';
+    btnOk.className = 'sdo-btn sdo-btn-primary';
+    btnOk.textContent = 'Додати';
+
+    footer.append(btnCancel, btnOk);
+    win.append(body, footer);
+    overlay.append(win);
+
+    const close = () => {
+      document.removeEventListener('keydown', onKeyDown, true);
+      overlay.remove();
+    };
+
+    const doSubmit = async () => {
+      await onSubmit(values);
+      close();
+    };
+
+    btnCancel.addEventListener('click', () => {
+      onCancel?.();
+      close();
+    });
+    btnOk.addEventListener('click', () => { void doSubmit(); });
+
+    // Keyboard UX
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onCancel?.();
+        close();
+        return;
+      }
+      if (e.key !== 'Enter') return;
+
+      // Ctrl+Enter = submit from anywhere
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        void doSubmit();
+        return;
+      }
+
+      const active = document.activeElement;
+      const idx = inputs.indexOf(active);
+      if (idx === -1) return;
+
+      e.preventDefault();
+      // Shift+Enter = back
+      if (e.shiftKey) {
+        const prev = inputs[idx - 1];
+        if (prev) prev.focus();
+        return;
+      }
+      // Enter = next, or submit on last
+      const next = inputs[idx + 1];
+      if (next) next.focus();
+      else void doSubmit();
+    };
+
+    document.addEventListener('keydown', onKeyDown, true);
+    document.body.append(overlay);
+
+    // Focus first input
+    queueMicrotask(() => { inputs[0]?.focus(); });
   }
 
   function columnSettingsUI(host, schema, settings, onChange) {
@@ -293,6 +545,9 @@ export function createTableRendererModule(opts = {}) {
         const selectBtn = document.createElement('button');
         selectBtn.textContent = selectionMode ? 'Вибір: ON' : 'Вибір';
 
+        const transferSelectedBtn = document.createElement('button');
+        transferSelectedBtn.textContent = 'Перенести обрані';
+
         const search = document.createElement('input');
         search.placeholder = 'Пошук';
 
@@ -323,7 +578,7 @@ export function createTableRendererModule(opts = {}) {
           controls.classList.add('sdo-table-controls-inline');
           headerHost.append(controls);
         }
-        controls.append(addBtn, selectBtn, search);
+        controls.append(addBtn, selectBtn, transferSelectedBtn, search);
         mount.append(container);
 
         const listeners = [];
@@ -334,9 +589,9 @@ export function createTableRendererModule(opts = {}) {
         const refreshTable = async () => {
           const settings = await loadSettings(runtime.storage);
           const resolved = await resolveSchema(runtime);
-          const schema = resolved.schema;
           currentJournalId = resolved.state?.activeJournalId ?? null;
           const dataset = await loadDataset(runtime, runtime.storage, currentJournalId);
+          const schema = resolved.schema;
           if (!schema || !Array.isArray(schema.fields) || schema.fields.length === 0) {
             table.innerHTML = '';
             const msg = document.createElement('div');
@@ -356,7 +611,6 @@ export function createTableRendererModule(opts = {}) {
           const view = engine.compute();
 
           table.innerHTML = '';
-
           // One table:
           // - <thead> has 2 sticky rows (titles + column numbers)
           // - plus 2 fixed-width action columns on the far right (Transfer / Delete), like v1
@@ -393,6 +647,7 @@ export function createTableRendererModule(opts = {}) {
             idxTr.append(thIdx);
           }
 
+          // Action columns (fixed width)
           const colTransfer = document.createElement('col');
           colTransfer.style.width = `${actionsColW}px`;
           colTransfer.style.minWidth = `${actionsColW}px`;
@@ -419,8 +674,6 @@ export function createTableRendererModule(opts = {}) {
           table.append(colgroup);
           table.append(thead);
 
-          // Measure the 1st header row height and set CSS var so the 2nd row can sticky under it.
-          // (Needed because row height can change with theme/font/2-line labels.)
           const syncHeaderHeights = () => {
             const h = titleTr.getBoundingClientRect().height;
             table.style.setProperty('--sdo-thead-row1-h', `${Math.ceil(h)}px`);
@@ -516,7 +769,7 @@ if (isFirstCol) {
               transferBtn.title = 'Перенести рядок';
               transferBtn.addEventListener('click', (ev) => {
                 ev.stopPropagation();
-                runtime.sdo.commands.run('table.transferRow', { rowId: row.rowId });
+                runtime.sdo.commands.run('table.transferRow', { rowId: row.rowId, sourceJournalId: currentJournalId });
               });
               tdTransfer.append(transferBtn);
               tr.append(tdTransfer);
@@ -613,13 +866,18 @@ if (isFirstCol) {
           });
         });
 
-          modal.modal.append(form);
-          document.body.append(modal.overlay);
-        });
-
         selectBtn.addEventListener('click', async () => {
           selectionMode = !selectionMode;
           await refreshTable();
+        });
+
+        transferSelectedBtn.addEventListener('click', async () => {
+          const selectedIds = [...(engine?.compute()?.selection ?? [])];
+          if (!selectedIds.length) {
+            window.UI?.toast?.show?.('Оберіть рядки для перенесення');
+            return;
+          }
+          await runtime.sdo.commands.run('table.transferSelected', { sourceJournalId: currentJournalId, rowIds: selectedIds });
         });
 
         search.addEventListener('change', async () => {
@@ -665,7 +923,41 @@ if (isFirstCol) {
         {
           id: 'table.transferRow',
           title: 'Transfer row',
-          run: async () => true
+          run: async (runtime, args = {}) => {
+            const sourceJournalId = args.sourceJournalId ?? runtime?.api?.getState?.()?.activeJournalId;
+            if (!sourceJournalId || !args.rowId) return false;
+            const transferUI = createTransferUiBridge(runtime, runtime.storage ?? ctx.storage);
+            await transferUI.openRunTransferModal({ sourceJournalId, recordIds: [args.rowId] });
+            return true;
+          }
+        },
+        {
+          id: 'table.transferSelected',
+          title: 'Transfer selected rows',
+          run: async (runtime, args = {}) => {
+            const sourceJournalId = args.sourceJournalId ?? runtime?.api?.getState?.()?.activeJournalId;
+            let rowIds = Array.isArray(args.rowIds) ? args.rowIds : [];
+            if (!rowIds.length) {
+              const settings = await loadSettings(runtime.storage ?? ctx.storage);
+              rowIds = Array.isArray(settings?.selectedRowIds) ? settings.selectedRowIds : [];
+            }
+            if (!sourceJournalId || !rowIds.length) return false;
+            const transferUI = createTransferUiBridge(runtime, runtime.storage ?? ctx.storage);
+            await transferUI.openRunTransferModal({ sourceJournalId, recordIds: rowIds });
+            return true;
+          }
+        },
+        {
+          id: 'table.testTransfer',
+          title: 'Test transfer',
+          run: async (runtime) => {
+            const transferRuntime = runtime?.api ? runtime : { api: ctx.api, sdo: ctx.api?.sdo, storage: ctx.storage };
+            const out = await runTestTransfer(transferRuntime, transferRuntime.storage ?? ctx.storage);
+            if (typeof window !== 'undefined' && window.UI?.toast?.show) {
+              window.UI.toast.show(`Test transfer: ${out.sourceJournalId} → ${out.targetJournalId}`);
+            }
+            return out;
+          }
         }
       ]);
 
@@ -683,6 +975,22 @@ if (isFirstCol) {
         location: 'toolbar',
         order: 31,
         onClick: () => ctx.commands.run('@sdo/module-table-renderer.toggle-selection-mode')
+      });
+
+      ctx.ui.registerButton({
+        id: '@sdo/module-table-renderer:transfer-selected',
+        label: 'Перенести обрані',
+        location: 'toolbar',
+        order: 32,
+        onClick: () => ctx.commands.run('table.transferSelected')
+      });
+
+      ctx.ui.registerButton({
+        id: '@sdo/module-table-renderer:test-transfer',
+        label: 'Test transfer',
+        location: 'toolbar',
+        order: 33,
+        onClick: () => ctx.commands.run('table.testTransfer')
       });
 
       ctx.ui.registerPanel({
