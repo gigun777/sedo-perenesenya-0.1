@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { buildTransferPlan, previewTransferPlan, applyTransferPlan } from "./src/index.js";
 import {
   buildTransferPlan,
   previewTransferPlan,
@@ -8,6 +9,7 @@ import {
 const sourceDataset = {
   journalId: "A",
   records: [
+    { id: "r1", cells: { a: "Іван", b: "Петренко", n1: 10, n2: 2 } }
     {
       id: "r1",
       cells: {
@@ -21,6 +23,26 @@ const sourceDataset = {
 const targetDataset = {
   journalId: "B",
   records: [
+    { id: "t1", cells: { x: "", total: 0 } }
+  ]
+};
+
+const sourceSchema = {
+  journalId: "A",
+  fields: [
+    { id: "a", title: "A", type: "text" },
+    { id: "b", title: "B", type: "text" },
+    { id: "n1", title: "N1", type: "number" },
+    { id: "n2", title: "N2", type: "number" }
+  ]
+};
+
+const targetSchema = {
+  journalId: "B",
+  fields: [
+    { id: "x", title: "X", type: "multiline" },
+    { id: "total", title: "Total", type: "number" }
+  ]
     {
       id: "r1",
       cells: {
@@ -37,6 +59,39 @@ const schema = {
 
 const template = {
   id: "tpl-1",
+  title: "Transfer sample",
+  rules: [
+    {
+      id: "rule-1",
+      name: "Concat",
+      sources: [
+        { cell: { journalId: "A", recordId: "r1", fieldId: "a" } },
+        { cell: { journalId: "A", recordId: "r1", fieldId: "b" } }
+      ],
+      op: "concat",
+      params: { separator: " / ", trim: true, skipEmpty: true },
+      targets: [{ cell: { journalId: "B", recordId: "t1", fieldId: "x" } }],
+      write: { mode: "replace" }
+    },
+    {
+      id: "rule-2",
+      name: "Append line",
+      sources: [{ value: "додатковий рядок" }],
+      op: "direct",
+      params: {},
+      targets: [{ cell: { journalId: "B", recordId: "t1", fieldId: "x" } }],
+      write: { mode: "append", appendMode: "newline" }
+    },
+    {
+      id: "rule-3",
+      name: "Math",
+      sources: [
+        { cell: { journalId: "A", recordId: "r1", fieldId: "n1" } },
+        { cell: { journalId: "A", recordId: "r1", fieldId: "n2" } }
+      ],
+      op: "math",
+      params: { mathOp: "/", precision: 2 },
+      targets: [{ cell: { journalId: "B", recordId: "t1", fieldId: "total" } }],
   title: "Concat full name",
   rules: [
     {
@@ -53,6 +108,21 @@ const template = {
 
 const plan = buildTransferPlan({
   template,
+  source: { schema: sourceSchema, dataset: sourceDataset },
+  target: { schema: targetSchema, dataset: targetDataset },
+  selection: { recordIds: ["r1"] },
+  context: { currentRecordId: "r1", targetRecordId: "t1" }
+});
+
+const preview = previewTransferPlan(plan);
+assert.equal(preview.errors.length, 0);
+assert.equal(preview.rules.length, 3);
+assert.equal(preview.writes.length, 3);
+
+const applied = applyTransferPlan(plan);
+assert.equal(applied.report.errors.length, 0);
+assert.equal(applied.targetNextDataset.records[0].cells.x, "Іван / Петренко\nдодатковий рядок");
+assert.equal(applied.targetNextDataset.records[0].cells.total, 5);
   source: { schema, dataset: sourceDataset },
   target: { schema: { ...schema, journalId: "B" }, dataset: targetDataset },
   selection: { recordIds: ["r1"] },
