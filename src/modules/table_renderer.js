@@ -1,5 +1,6 @@
 import { createTableEngine } from './table_engine.js';
 import { formatCell as defaultFormatCell, parseInput as defaultParseInput } from './table_formatter.js';
+import { createTransferCore, createTransferStorage, createJournalsAdapter, createTransferUI } from '../../packages/transfer/src/index.js';
 import { buildTransferPlan, applyTransferPlan } from '../../packages/transfer-core/src/index.js';
 import { createTransferCore, createTransferStorage, createJournalsAdapter, createTransferUI } from '../../packages/transfer/src/index.js';
 import { createTransferUI } from '../../packages/transfer-ui/src/index.js';
@@ -113,6 +114,8 @@ export function createTableRendererModule(opts = {}) {
     const targetJournalId = journals.find((journal) => journal.id !== sourceJournalId)?.id ?? null;
     if (!targetJournalId) throw new Error('Не знайдено цільовий журнал для test transfer');
 
+    const sourceDataset = await loadDataset(runtime, storage, sourceJournalId);
+    const targetDataset = await loadDataset(runtime, storage, targetJournalId);
     const sourceResolved = await resolveSchemaByJournalId(runtime, sourceJournalId);
     const targetResolved = await resolveSchemaByJournalId(runtime, targetJournalId);
 
@@ -131,6 +134,7 @@ export function createTableRendererModule(opts = {}) {
       throw new Error('Недостатньо рядків у source/target dataset для test transfer');
     }
 
+    const transferUI = createTransferUiBridge(runtime, storage);
     const leftField = sourceFields[0].id;
     const rightField = sourceFields[1]?.id ?? sourceFields[0].id;
     const targetField = targetFields[0].id;
@@ -143,18 +147,30 @@ export function createTableRendererModule(opts = {}) {
           id: 'rule-1',
           name: 'concat sample',
           sources: [
+            { cell: { journalId: sourceJournalId, recordId: sourceRecord.id, fieldId: Object.keys(sourceRecord.cells ?? {})[0] } },
+            { value: 'test' }
             { cell: { journalId: sourceJournalId, recordId: sourceRecord.id, fieldId: leftField } },
             { cell: { journalId: sourceJournalId, recordId: sourceRecord.id, fieldId: rightField } }
           ],
           op: 'concat',
           params: { separator: ' / ', trim: true, skipEmpty: true },
           targets: [
+            { cell: { journalId: targetJournalId, recordId: targetRecord.id, fieldId: Object.keys(targetRecord.cells ?? {})[0] } }
             { cell: { journalId: targetJournalId, recordId: targetRecord.id, fieldId: targetField } }
           ],
           write: { mode: 'replace' }
         }
       ]
     };
+
+    await transferUI.core.templates.save(template);
+    const prepared = await transferUI.core.prepareTransfer({
+      templateId: template.id,
+      sourceRef: { journalId: sourceJournalId },
+      rowIds: [sourceRecord.id]
+    });
+    const previewCtx = await transferUI.core.preview(prepared, { targetRef: { journalId: targetJournalId } });
+    const result = await transferUI.core.commit(previewCtx);
 
     const plan = buildTransferPlan({
       template,
@@ -168,6 +184,10 @@ export function createTableRendererModule(opts = {}) {
     if (result.report.errors.length) {
       throw new Error(`Test transfer failed: ${result.report.errors.map((error) => error.code).join(', ')}`);
     }
+
+    return { sourceJournalId, targetJournalId, report: result.report };
+  }
+
 
     await saveDataset(runtime, storage, targetJournalId, result.targetNextDataset);
     return { sourceJournalId, targetJournalId, report: result.report };
@@ -207,6 +227,7 @@ export function createTableRendererModule(opts = {}) {
 
     const core = createTransferCore({ storage: storageApi, journals: journalsApi, logger: console });
 
+    const transferUI = createTransferUI({
     return createTransferUI({
       core,
       journals: journalsApi,
@@ -215,6 +236,8 @@ export function createTableRendererModule(opts = {}) {
         closeModal: (id) => window.UI.modal.close(id)
       }
     });
+
+    return transferUI;
         const state = stateGetter();
         return (state?.journals ?? []).map((journal) => ({ id: journal.id, title: journal.title }));
       }

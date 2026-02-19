@@ -5,6 +5,8 @@ export function createTransferUI({ core, ui, journals }) {
   if (!ui) throw new Error('createTransferUI requires ui adapter');
 
   return {
+    core,
+
     async openSettings(container) {
       return renderTransferSettings(container, { core, ui });
     },
