@@ -37,6 +37,7 @@ export function createModuleManagerUI({ sdo, mount, api }) {
   function ensureGlobalUIBridge() {
     const UI = (window.UI = window.UI || {});
     UI.settings = UI.settings || {};
+    UI.sdo = sdo;
 
     if (!UI.modal || typeof UI.modal.open !== 'function' || typeof UI.modal.close !== 'function') {
       let modalSeq = 0;
